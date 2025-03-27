@@ -74,9 +74,10 @@
 <script type="text/javascript" src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.7.0/jquery.min.js"></script>
 <script type="text/javascript" src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.3.0/js/bootstrap.bundle.min.js"></script>
 <!-- STOMP over SockJS -->
-<script src="https://cdnjs.cloudflare.com/ajax/libs/sockjs-client/1.6.1/sockjs.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/stomp.js/2.3.3/stomp.min.js"></script>
-
+<script type="text/javascript" src="https://cdnjs.cloudflare.com/ajax/libs/sockjs-client/1.6.1/sockjs.min.js"></script>
+<script type="text/javascript" src="https://cdnjs.cloudflare.com/ajax/libs/stomp.js/2.3.3/stomp.min.js"></script>
+<script type="text/javascript" src="/js/services/apiInterceptor.js"></script>
+<script type="text/javascript" src="/js/tokenManager.js"></script>
 <!-- Load DTO classes first -->
 <script type="text/javascript" src="/js/dto/DiscordDTO.js"></script>
 <script type="text/javascript" src="/js/dto/UserDTO.js"></script>
@@ -531,23 +532,63 @@
     // Actions for app logic
     window.actions = {
         // Load initial data
-        async initialize() {
+        async  initialize() {
             try {
                 // Set loading state
                 mutations.setState('status.loading', true);
 
                 // Load current user (bot)
-                const botUser = await api.user.getCurrent();
+                let botUser;
+                try {
+                    // Try different API method names for getting current user
+                    if (api.user && typeof api.user.getCurrentUser === 'function') {
+                        botUser = await api.user.getCurrentUser();
+                    } else if (api.user && typeof api.user.getCurrent === 'function') {
+                        botUser = await api.user.getCurrent();
+                    } else if (api.user && typeof api.user.me === 'function') {
+                        botUser = await api.user.me();
+                    } else {
+                        // Fallback to a direct request
+                        botUser = await api.request('users/me');
+                    }
+                } catch (error) {
+                    console.warn('Error loading current user, using default:', error);
+                    botUser = {
+                        id: '0',
+                        name: 'Bot',
+                        discriminator: '0000',
+                        bot: true
+                    };
+                }
                 mutations.setState('currentUser', botUser);
 
                 // Load guilds
-                const guilds = await api.guild.getAll();
+                let guilds = [];
+                try {
+                    // Try different API method names for getting guilds
+                    if (api.guild && typeof api.guild.getGuilds === 'function') {
+                        guilds = await api.guild.getGuilds();
+                    } else if (api.guild && typeof api.guild.getAll === 'function') {
+                        guilds = await api.guild.getAll();
+                    } else if (api.guild && typeof api.guild.all === 'function') {
+                        guilds = await api.guild.all();
+                    } else {
+                        // Fallback to a direct request
+                        guilds = await api.request('guilds');
+                    }
+                } catch (error) {
+                    console.warn('Error loading guilds:', error);
+                }
                 mutations.setState('guilds', guilds);
 
                 // Initialize websocket if available
                 if (window.wsHandler) {
                     const wsEndpoint = window.CONFIG?.WEBSOCKET?.ENDPOINT || '/ws';
-                    window.wsHandler.connect(wsEndpoint);
+                    // Get token from localStorage or another appropriate source
+                    const token = localStorage.getItem('auth_token');
+
+                    // Make sure to provide both the URL and token parameters
+                    window.wsHandler.connect(wsEndpoint, token);
                 }
 
                 // Update UI
@@ -1366,7 +1407,6 @@
     };
 </script>
 
-// Add to your index.html
 <script>
     // Basic error handling for API testing
     async function testAuth() {

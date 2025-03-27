@@ -209,6 +209,7 @@
     };
 
     // Parse URL parameters for error/logout messages
+    // Parse URL parameters for error/logout messages
     document.addEventListener('DOMContentLoaded', async function() {
         const params = new URLSearchParams(window.location.search);
         const alertContainer = document.getElementById('alert-container');
@@ -216,6 +217,7 @@
         if (tokenStorage.hasToken()) {
             const token = tokenStorage.getToken();
 
+            // First check if token is expired by checking JWT payload
             if (isTokenExpired(token)) {
                 console.warn('Token is expired, redirecting to login');
                 tokenStorage.removeToken();
@@ -223,6 +225,7 @@
                 return;
             }
 
+            // Then validate with server if needed
             const isValid = await validateToken(token);
             if (isValid) {
                 window.location.href = '/';
@@ -234,10 +237,26 @@
 
         // Handle URL parameters for messages
         if (params.get('error')) {
+            let errorMessage = 'Invalid username or password';
+
+            // Handle different error types
+            switch(params.get('error')) {
+                case 'session_expired':
+                    errorMessage = 'Your session has expired. Please login again.';
+                    break;
+                case 'expired':
+                    errorMessage = 'Your authentication token has expired. Please login again.';
+                    break;
+                case 'invalid':
+                    errorMessage = 'Your authentication token is invalid. Please login again.';
+                    break;
+                // Default case already set above
+            }
+
             alertContainer.innerHTML = `
             <div class="alert alert-danger">
                 <i class="fas fa-exclamation-circle me-2"></i>
-                Invalid username or password
+                ${errorMessage}
             </div>
         `;
         } else if (params.get('logout')) {
@@ -265,6 +284,23 @@
     // Modify your login form handler to log more details
     document.getElementById('login-form').addEventListener('submit', async function(event) {
         event.preventDefault();
+
+        const token = tokenStorage.getToken();
+        if (!token) {
+            console.log('No token found in localStorage');
+            return;
+        }
+
+        console.log('Current token:', token);
+
+        try {
+            const isValid = await validateToken(token);
+            console.log('Token is valid:', isValid);
+            alert(`Token validation result: ${isValid ? 'VALID' : 'INVALID'}`);
+        } catch (error) {
+            console.error('Debug validation error:', error);
+            alert('Validation error: ' + error.message);
+        }
 
         const submitBtn = event.target.querySelector('button[type="submit"]');
         submitBtn.disabled = true;

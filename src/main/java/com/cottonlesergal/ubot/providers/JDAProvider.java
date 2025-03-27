@@ -54,6 +54,16 @@ public class JDAProvider {
                     .setMemberCachePolicy(MemberCachePolicy.ALL)
                     .setChunkingFilter(ChunkingFilter.ALL)
                     .enableCache(EnumSet.allOf(CacheFlag.class))
+                    .setEnabledIntents(
+                            GatewayIntent.GUILD_MESSAGES,
+                            GatewayIntent.GUILD_MESSAGE_REACTIONS,
+                            GatewayIntent.MESSAGE_CONTENT,
+                            GatewayIntent.GUILD_MEMBERS,
+                            GatewayIntent.GUILD_PRESENCES,
+                            GatewayIntent.GUILD_VOICE_STATES,
+                            GatewayIntent.GUILD_EXPRESSIONS,
+                            GatewayIntent.SCHEDULED_EVENTS
+                    )
                     .addEventListeners(
                             messageListener,
                             guildListener,

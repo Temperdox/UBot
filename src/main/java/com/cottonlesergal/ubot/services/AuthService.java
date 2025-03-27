@@ -44,13 +44,13 @@ public class AuthService {
     private final AuthTokenRepository authTokenRepository;
     private final BCryptPasswordEncoder passwordEncoder;
 
-    @Value("${jwt.secret:defaultSecretKeyThatShouldBeReplacedInProduction}")
+    @Value("${jwt.secret}")
     private String secret;
 
-    @Value("${jwt.expiration:3600}") // Default to 1 hour
+    @Value("${jwt.expiration}") // Default to 1 hour
     private long jwtExpirationInSeconds;
 
-    @Value("${jwt.refresh.expiration:86400}") // Default to 24 hours
+    @Value("${jwt.refresh.expiration}") // Default to 24 hours
     private long refreshExpirationInSeconds;
 
     private Key getSigningKey() {

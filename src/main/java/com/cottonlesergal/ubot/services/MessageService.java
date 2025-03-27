@@ -2,11 +2,15 @@ package com.cottonlesergal.ubot.services;
 
 import com.cottonlesergal.ubot.dtos.MessageDTO;
 import com.cottonlesergal.ubot.entities.Channel;
+import com.cottonlesergal.ubot.entities.Guild;
 import com.cottonlesergal.ubot.entities.Message;
+import com.cottonlesergal.ubot.entities.MessageAttachment;
 import com.cottonlesergal.ubot.exceptions.DiscordApiException;
 import com.cottonlesergal.ubot.exceptions.ResourceNotFoundException;
 import com.cottonlesergal.ubot.providers.JDAProvider;
 import com.cottonlesergal.ubot.repositories.ChannelRepository;
+import com.cottonlesergal.ubot.repositories.GuildRepository;
+import com.cottonlesergal.ubot.repositories.MessageAttachmentRepository;
 import com.cottonlesergal.ubot.repositories.MessageRepository;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -28,10 +32,7 @@ import java.io.IOException;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
 
@@ -46,12 +47,14 @@ public class MessageService {
     private final JDAProvider jda;
     private final MessageRepository messageRepository;
     private final ChannelRepository channelRepository;
+    private final MessageAttachmentRepository messageAttachmentRepository;
 
     @Autowired
-    public MessageService(@Lazy JDAProvider jda, MessageRepository messageRepository, ChannelRepository channelRepository) {
+    public MessageService(@Lazy JDAProvider jda, MessageRepository messageRepository, ChannelRepository channelRepository, MessageAttachmentRepository messageAttachmentRepository) {
         this.jda = jda;
         this.messageRepository = messageRepository;
         this.channelRepository = channelRepository;
+        this.messageAttachmentRepository = messageAttachmentRepository;
     }
 
     private Channel fetchChannelFromJdaAndPersist(String channelId) {
@@ -108,8 +111,55 @@ public class MessageService {
      * @return Page of message DTOs
      */
     public Page<MessageDTO> getMessagesForChannel(String channelId, Pageable pageable) {
-        Channel channel = channelRepository.findById(channelId).orElseGet(() -> fetchChannelFromJdaAndPersist(channelId));
-        return messageRepository.findByChannelId(channelId, pageable).map(this::convertToMessageDTO);
+        log.debug("Getting messages for channel ID: {}", channelId);
+
+        try {
+            // First check if channel exists
+            Channel channel = channelRepository.findById(channelId)
+                    .orElseGet(() -> {
+                        log.warn("Channel not found in database, fetching from Discord API: {}", channelId);
+                        return fetchChannelFromJdaAndPersist(channelId);
+                    });
+
+            // Get messages from repository
+            Page<Message> messagePage = messageRepository.findByChannelId(channelId, pageable);
+
+            // Log message count for debugging
+            log.info("Found {} messages for channel {} in database",
+                    messagePage.getContent().size(), channelId);
+
+            // If no messages found, try to fetch from Discord API
+            if (messagePage.getContent().isEmpty()) {
+                log.info("No messages found in database, attempting to fetch from Discord API");
+
+                // Fetch messages from Discord and save to database
+                try {
+                    List<net.dv8tion.jda.api.entities.Message> jdaMessages =
+                            Objects.requireNonNull(jda.getJda()
+                                            .getChannelById(MessageChannel.class, channelId))
+                                    .getHistory()
+                                    .retrievePast(pageable.getPageSize())
+                                    .complete();
+
+                    log.info("Fetched {} messages from Discord API", jdaMessages.size());
+
+                    // Save messages to database
+                    jdaMessages.forEach(this::saveMessageToDatabase);
+
+                    // Retry database query
+                    messagePage = messageRepository.findByChannelId(channelId, pageable);
+                    log.info("After fetching from API, found {} messages in database",
+                            messagePage.getContent().size());
+                } catch (Exception e) {
+                    log.error("Error fetching messages from Discord API: {}", e.getMessage(), e);
+                }
+            }
+
+            return messagePage.map(this::convertToMessageDTO);
+        } catch (Exception e) {
+            log.error("Error retrieving messages for channel {}: {}", channelId, e.getMessage(), e);
+            return Page.empty(pageable);
+        }
     }
 
     /**
@@ -435,21 +485,18 @@ public class MessageService {
      */
     private void saveMessageToDatabase(net.dv8tion.jda.api.entities.Message jdaMessage) {
         try {
+            log.debug("Saving message to database: {}", jdaMessage.getId());
+
             // Check if channel exists in DB
             String channelId = jdaMessage.getChannel().getId();
             Channel channel = channelRepository.findById(channelId)
                     .orElseGet(() -> {
                         // Create channel record if not exists
+                        log.debug("Creating new channel record: {}", channelId);
                         Channel newChannel = new Channel();
                         newChannel.setId(channelId);
                         newChannel.setName(jdaMessage.getChannel().getName());
                         newChannel.setType(jdaMessage.getChannel().getType().toString());
-
-                        if (jdaMessage.isFromGuild()) {
-                            // Set guild info for the channel
-                            // This would typically be handled by a Guild repository
-                            // For simplicity, we're just setting the essential info
-                        }
 
                         return channelRepository.save(newChannel);
                     });
@@ -480,16 +527,42 @@ public class MessageService {
             }
 
             // Save the message
-            messageRepository.save(message);
+            Message savedMessage = messageRepository.save(message);
+            log.debug("Message saved successfully: {}", savedMessage.getId());
 
-            // Process attachments, embeds, and reactions if needed
-            // This would typically involve separate repositories for these entities
+            // Process attachments if present
+            if (!jdaMessage.getAttachments().isEmpty()) {
+                processAttachments(jdaMessage, savedMessage);
+            }
 
         } catch (Exception e) {
             log.error("Failed to save message to database: {}", e.getMessage(), e);
-            // Don't throw exception as this is a background operation
-            // The message was still successfully sent to Discord
         }
+    }
+
+    /**
+     * Process and save message attachments
+     */
+    private void processAttachments(net.dv8tion.jda.api.entities.Message jdaMessage, Message savedMessage) {
+        jdaMessage.getAttachments().forEach(attachment -> {
+            try {
+                MessageAttachment attachmentEntity = new MessageAttachment();
+                attachmentEntity.setId(attachment.getId());
+                attachmentEntity.setMessage(savedMessage);
+                attachmentEntity.setFileName(attachment.getFileName());
+                attachmentEntity.setUrl(attachment.getUrl());
+                attachmentEntity.setSize((long) attachment.getSize());
+
+                if (attachment.getWidth() > 0) {
+                    attachmentEntity.setWidth(attachment.getWidth());
+                    attachmentEntity.setHeight(attachment.getHeight());
+                }
+
+                messageAttachmentRepository.save(attachmentEntity);
+            } catch (Exception e) {
+                log.error("Error saving attachment: {}", e.getMessage(), e);
+            }
+        });
     }
 
     /**

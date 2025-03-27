@@ -45,7 +45,7 @@ public class SecurityConfig implements WebMvcConfigurer {
 
     private final AuthService authService;
     private final UserCredentialRepository userCredentialRepository;
-    private JwtAuthenticationFilter jwtAuthenticationFilter;
+    private final JwtAuthenticationFilter jwtAuthenticationFilter;
 
 
     @Autowired
@@ -66,14 +66,22 @@ public class SecurityConfig implements WebMvcConfigurer {
                 .csrf(AbstractHttpConfigurer::disable)
                 .cors(cors -> cors.configurationSource(corsConfigurationSource()))
                 .authorizeHttpRequests(auth -> auth
-                        .requestMatchers("/", "/index.html", "/login.html", "/css/**", "/js/**", "/fonts/**").permitAll()
+                        // Explicitly permit static resources
+                        .requestMatchers("/", "/index.html", "/login.html", "/css/**", "/js/**", "/fonts/**", "/images/**",
+                                "/favicon.ico").permitAll()
+                        // Auth endpoints are public
                         .requestMatchers("/api/auth/**").permitAll()
+                        // WebSocket endpoints need to be accessible
+                        .requestMatchers("/ws/**").permitAll()
+                        // API endpoints require authentication
                         .requestMatchers("/api/**").authenticated()
+                        // Everything else requires authentication
                         .anyRequest().authenticated()
                 )
                 .sessionManagement(session -> session
                         .sessionCreationPolicy(SessionCreationPolicy.STATELESS)
                 )
+                // Add JWT filter before Spring's UsernamePasswordAuthenticationFilter
                 .addFilterBefore(jwtAuthenticationFilter, UsernamePasswordAuthenticationFilter.class);
 
         return http.build();
@@ -89,11 +97,11 @@ public class SecurityConfig implements WebMvcConfigurer {
             UserCredential user = userCredentialRepository.findByUsername(username)
                     .orElseThrow(() -> new UsernameNotFoundException("User not found with username: " + username));
 
-            return new User(
-                    user.getUsername(),
-                    user.getPassword(),
-                    Collections.emptyList()
-            );
+            return User.builder()
+                    .username(user.getUsername())
+                    .password(user.getPassword())
+                    .roles("ADMIN") // Give all users ADMIN role for simplicity
+                    .build();
         };
     }
 
@@ -115,7 +123,7 @@ public class SecurityConfig implements WebMvcConfigurer {
     @Bean
     public CorsConfigurationSource corsConfigurationSource() {
         CorsConfiguration configuration = new CorsConfiguration();
-        configuration.setAllowedOrigins(List.of("http://localhost:8080")); // Adjust for production
+        configuration.setAllowedOrigins(List.of("*")); // This is important for local development
         configuration.setAllowedMethods(List.of("GET", "POST", "PUT", "DELETE", "OPTIONS"));
         configuration.setAllowedHeaders(List.of("*"));
         configuration.setExposedHeaders(List.of("Authorization"));

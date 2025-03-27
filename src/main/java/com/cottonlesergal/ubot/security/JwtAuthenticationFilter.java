@@ -7,10 +7,10 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.core.userdetails.User;
 import org.springframework.security.core.userdetails.UserDetails;
-import org.springframework.security.core.userdetails.UserDetailsService;
 import org.springframework.security.web.authentication.WebAuthenticationDetailsSource;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
@@ -28,11 +28,9 @@ import java.util.Map;
 public class JwtAuthenticationFilter extends OncePerRequestFilter {
 
     private final AuthService authService;
-    private final UserDetailsService userDetailsService;
 
-    public JwtAuthenticationFilter(AuthService authService, UserDetailsService userDetailsService) {
+    public JwtAuthenticationFilter(AuthService authService) {
         this.authService = authService;
-        this.userDetailsService = userDetailsService;
     }
 
     @Override
@@ -44,18 +42,34 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
             String jwt = getJwtFromRequest(request);
 
             if (StringUtils.hasText(jwt) && authService.validateToken(jwt)) {
-                log.info("JWT is valid, extracting user...");
+                log.info("JWT is valid, extracting user info...");
+
+                // Get user info from token
                 Map<String, Object> userInfo = authService.getUserInfoFromToken(jwt);
                 String username = (String) userInfo.get("username");
                 log.info("User from JWT: {}", username);
 
-                UserDetails userDetails = userDetailsService.loadUserByUsername(username);
+                if (username != null) {
+                    // Create authentication token with admin role
+                    UserDetails userDetails = User.builder()
+                            .username(username)
+                            .password("") // Password is not needed as we've already validated the token
+                            .authorities(Collections.singletonList(new SimpleGrantedAuthority("ROLE_ADMIN")))
+                            .build();
 
-                UsernamePasswordAuthenticationToken authentication =
-                        new UsernamePasswordAuthenticationToken(userDetails, null, userDetails.getAuthorities());
+                    // Create authentication token
+                    UsernamePasswordAuthenticationToken auth =
+                            new UsernamePasswordAuthenticationToken(userDetails, null, userDetails.getAuthorities());
 
-                authentication.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));
-                SecurityContextHolder.getContext().setAuthentication(authentication);
+                    // Set details
+                    auth.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));
+
+                    // Set authentication in security context
+                    SecurityContextHolder.getContext().setAuthentication(auth);
+                    log.info("Successfully set authentication for user: {}", username);
+                } else {
+                    log.warn("Username is null in JWT token");
+                }
             } else {
                 log.warn("No JWT found or invalid token.");
             }

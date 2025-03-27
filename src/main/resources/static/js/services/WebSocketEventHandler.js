@@ -11,6 +11,8 @@ class WebSocketEventHandler {
         this.reconnectDelay = 2000; // Start with 2 seconds
         this.heartbeatInterval = null;
         this.heartbeatTimeout = null;
+        this.tokenRefreshInterval = null;
+        this.lastHeartbeatResponse = 0;
         this.lastUrl = null;
         this.lastToken = null;
 
@@ -34,6 +36,8 @@ class WebSocketEventHandler {
         this.handleGuildEvent = this.handleGuildEvent.bind(this);
         this.handleChannelEvent = this.handleChannelEvent.bind(this);
         this.reconnect = this.reconnect.bind(this);
+        this.startTokenRefresh = this.startTokenRefresh.bind(this);
+        this.sendPing = this.sendPing.bind(this);
     }
 
     /**
@@ -77,9 +81,13 @@ class WebSocketEventHandler {
                     console.log('WebSocket connection established');
                     this.connected = true;
                     this.reconnectAttempts = 0;
+                    this.lastHeartbeatResponse = Date.now();
 
                     // Start heartbeat
                     this.startHeartbeat();
+
+                    // Start token refresh
+                    this.startTokenRefresh();
 
                     // Set up subscriptions
                     this.setupSubscriptions();
@@ -124,6 +132,12 @@ class WebSocketEventHandler {
         this.subscriptions.messageEvents = this.stompClient.subscribe(
             '/topic/messages',
             frame => this.onStompMessage(frame)
+        );
+
+        // Subscribe to pong responses
+        this.subscriptions.pong = this.stompClient.subscribe(
+            '/user/queue/pong',
+            frame => this.handlePong(frame)
         );
 
         // Add more subscriptions as needed
@@ -218,8 +232,9 @@ class WebSocketEventHandler {
             this.stompClient = null;
         }
 
-        // Clear heartbeat
+        // Clear heartbeat and token refresh
         this.clearHeartbeat();
+        this.clearTokenRefresh();
 
         // Update status
         this.connected = false;
@@ -268,16 +283,28 @@ class WebSocketEventHandler {
         // Send heartbeat every 30 seconds
         this.heartbeatInterval = setInterval(() => {
             if (this.connected && this.stompClient && this.stompClient.connected) {
-                this.send('/app/ping', { timestamp: Date.now() });
+                this.sendPing();
 
                 // Set timeout for pong response
                 this.heartbeatTimeout = setTimeout(() => {
-                    console.warn('Heartbeat timeout - no PONG received');
-                    this.disconnect();
-                    this.scheduleReconnect();
+                    // If no response for 10 seconds
+                    if (Date.now() - this.lastHeartbeatResponse > 10000) {
+                        console.warn('Heartbeat timeout - no PONG received');
+                        this.disconnect();
+                        this.scheduleReconnect();
+                    }
                 }, 10000); // 10 second timeout
             }
         }, 30000); // 30 second interval
+    }
+
+    /**
+     * Send a ping message
+     */
+    sendPing() {
+        if (this.connected && this.stompClient && this.stompClient.connected) {
+            this.send('/app/ping', { timestamp: Date.now() });
+        }
     }
 
     /**
@@ -292,6 +319,100 @@ class WebSocketEventHandler {
         if (this.heartbeatTimeout) {
             clearTimeout(this.heartbeatTimeout);
             this.heartbeatTimeout = null;
+        }
+    }
+
+    /**
+     * Start token refresh interval
+     * Refreshes token 5 minutes before expiration
+     */
+    startTokenRefresh() {
+        this.clearTokenRefresh();
+
+        // Check token expiration every minute
+        this.tokenRefreshInterval = setInterval(() => {
+            const token = localStorage.getItem('auth_token');
+            if (!token) return;
+
+            try {
+                // Decode JWT to check expiration
+                const payload = JSON.parse(atob(token.split('.')[1]));
+                const currentTime = Math.floor(Date.now() / 1000);
+
+                // If token expires in less than 5 minutes (300 seconds)
+                if (payload.exp && payload.exp - currentTime < 300) {
+                    console.log('Token expires soon, refreshing...');
+                    this.refreshToken();
+                }
+            } catch (error) {
+                console.error('Error checking token expiration:', error);
+            }
+        }, 60000); // Check every minute
+    }
+
+    /**
+     * Refresh authentication token
+     */
+    async refreshToken() {
+        try {
+            // Get refresh token from storage
+            const refreshToken = localStorage.getItem('refresh_token');
+            if (!refreshToken) {
+                throw new Error('No refresh token available');
+            }
+
+            // Request new token
+            const response = await fetch('/api/auth/refresh-token', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ refreshToken })
+            });
+
+            if (!response.ok) {
+                throw new Error(`Token refresh failed: ${response.status}`);
+            }
+
+            const data = await response.json();
+
+            // Store new token
+            localStorage.setItem('auth_token', data.token);
+            this.lastToken = data.token;
+
+            // If a new refresh token is provided, store it
+            if (data.refreshToken) {
+                localStorage.setItem('refresh_token', data.refreshToken);
+            }
+
+            console.log('Token refreshed successfully');
+
+            // Update connection with new token
+            if (this.connected && this.stompClient) {
+                // No need to disconnect and reconnect - the token is used for
+                // API requests, and the websocket connection remains valid
+            }
+
+            this.trigger('token_refreshed');
+
+        } catch (error) {
+            console.error('Token refresh failed:', error);
+
+            // If refresh fails, schedule a reconnect
+            if (this.connected) {
+                this.disconnect();
+                this.scheduleReconnect();
+            }
+        }
+    }
+
+    /**
+     * Clear token refresh interval
+     */
+    clearTokenRefresh() {
+        if (this.tokenRefreshInterval) {
+            clearInterval(this.tokenRefreshInterval);
+            this.tokenRefreshInterval = null;
         }
     }
 
@@ -384,11 +505,8 @@ class WebSocketEventHandler {
         console.log('Received welcome message:', data);
         this.trigger('welcome', data);
 
-        // Reset heartbeat timeout if any
-        if (this.heartbeatTimeout) {
-            clearTimeout(this.heartbeatTimeout);
-            this.heartbeatTimeout = null;
-        }
+        // Update last heartbeat response time
+        this.lastHeartbeatResponse = Date.now();
     }
 
     /**
@@ -396,11 +514,17 @@ class WebSocketEventHandler {
      * @param {object} data - Pong message data
      */
     handlePong(data) {
+        // Update last heartbeat response time
+        this.lastHeartbeatResponse = Date.now();
+
         // Clear heartbeat timeout
         if (this.heartbeatTimeout) {
             clearTimeout(this.heartbeatTimeout);
             this.heartbeatTimeout = null;
         }
+
+        console.log('Received pong response');
+        this.trigger('pong', data);
     }
 
     /**
@@ -409,6 +533,13 @@ class WebSocketEventHandler {
      */
     handleError(data) {
         console.error('WebSocket error message:', data);
+
+        // Check if it's an authentication error
+        if (data.error && data.error.includes('auth')) {
+            // Try to refresh token immediately
+            this.refreshToken();
+        }
+
         this.trigger('ws_error', data);
     }
 
